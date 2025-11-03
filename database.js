@@ -14,41 +14,62 @@ export async function getGameStateRecord(room) {
     return null;
 }
 
-export async function initializeDatabase(room) {
-    console.log("Host is checking for existing game state...");
-    let records = room.collection(COLLECTION_NAME).getList();
-    
-    // Wait for records to sync from the network.
-    for (let i = 0; i < 5 && records.length === 0; i++) {
-        console.log(`Attempt ${i + 1}: No records found, waiting...`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        records = room.collection(COLLECTION_NAME).getList();
-    }
+export function initializeDatabase(room) {
+    return new Promise(resolve => {
+        console.log("Host is checking for existing game state...");
 
-    if (records.length === 0) {
-        console.log("No game state found after waiting. Creating the single master record.");
-        const initialState = {};
-        for (let i = 0; i < 10; i++) {
-            initialState[`slot_${i}`] = {};
-        }
-        try {
-            const newRecord = await room.collection(COLLECTION_NAME).create(initialState);
-            console.log("Game state created:", newRecord);
-            return newRecord;
-        } catch (e) {
-            console.error("Failed to create game state:", e);
-            // It's possible another client created it in the meantime. Re-fetch.
-            return await getGameStateRecord(room);
-        }
-    } else {
-        // Use the oldest record if multiple exist.
-        const recordToUse = records.slice().reverse()[0];
-        console.log("Game state found. Using existing record:", recordToUse);
-        if (records.length > 1) {
-            console.warn(`Found ${records.length} records, but will only use the oldest one.`);
-        }
-        return recordToUse;
-    }
+        let resolved = false;
+
+        const unsubscribe = room.collection(COLLECTION_NAME).subscribe(async (records) => {
+            if (resolved) return;
+
+            if (records && records.length > 0) {
+                resolved = true;
+                unsubscribe();
+                const recordToUse = records.slice().reverse()[0]; // get oldest
+                console.log("Game state found. Using existing record:", recordToUse);
+                if (records.length > 1) {
+                    console.warn(`Found ${records.length} records, but will only use the oldest one.`);
+                }
+                resolve(recordToUse);
+            }
+        });
+
+        // Set a timeout. If after this time no records have been found via the subscription,
+        // we assume we are the first and should create the record.
+        setTimeout(async () => {
+            if (resolved) return;
+
+            const currentRecords = room.collection(COLLECTION_NAME).getList();
+            if (currentRecords.length === 0) {
+                resolved = true;
+                unsubscribe();
+                console.log("No game state found after timeout. Creating the single master record.");
+                const initialState = {};
+                for (let i = 0; i < 10; i++) {
+                    initialState[`slot_${i}`] = {};
+                }
+                try {
+                    const newRecord = await room.collection(COLLECTION_NAME).create(initialState);
+                    console.log("Game state created:", newRecord);
+                    resolve(newRecord);
+                } catch (e) {
+                    console.error("Failed to create game state:", e);
+                    // It's possible another client created it in the meantime. Re-fetch.
+                    const record = await getGameStateRecord(room);
+                    resolve(record);
+                }
+            } else if (!resolved) {
+                // This case is for when getList has records, but the subscriber hasn't fired yet.
+                // It's a fallback to prevent duplicate creation.
+                resolved = true;
+                unsubscribe();
+                const recordToUse = currentRecords.slice().reverse()[0]; // get oldest
+                console.log("Game state found via getList fallback. Using existing record:", recordToUse);
+                resolve(recordToUse);
+            }
+        }, 5000); // 5-second timeout before creating.
+    });
 }
 
 export async function updateSlot(room, recordId, slotIndex, data) {
