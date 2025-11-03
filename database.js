@@ -1,0 +1,86 @@
+import { PLAYER_DATA_SLOT, WORLD_DATA_SLOT } from './shared.js';
+const COLLECTION_NAME = 'retroverse_state_v1';
+
+export async function getGameStateRecord(room) {
+    // This might be empty on first load until the collection is synced.
+    // getList() is sorted newest to oldest, we want the oldest, so we reverse.
+    const records = room.collection(COLLECTION_NAME).getList().slice().reverse();
+    if (records.length > 0) {
+        if (records.length > 1) {
+            console.warn("Multiple game state records found. Using the oldest one:", records[0]);
+        }
+        return records[0];
+    }
+    return null;
+}
+
+export async function initializeDatabase(room) {
+    console.log("Host is checking for existing game state...");
+    let records = room.collection(COLLECTION_NAME).getList();
+    
+    // Wait for records to sync from the network.
+    for (let i = 0; i < 5 && records.length === 0; i++) {
+        console.log(`Attempt ${i + 1}: No records found, waiting...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        records = room.collection(COLLECTION_NAME).getList();
+    }
+
+    if (records.length === 0) {
+        console.log("No game state found after waiting. Creating the single master record.");
+        const initialState = {};
+        for (let i = 0; i < 10; i++) {
+            initialState[`slot_${i}`] = {};
+        }
+        try {
+            const newRecord = await room.collection(COLLECTION_NAME).create(initialState);
+            console.log("Game state created:", newRecord);
+            return newRecord;
+        } catch (e) {
+            console.error("Failed to create game state:", e);
+            // It's possible another client created it in the meantime. Re-fetch.
+            return await getGameStateRecord(room);
+        }
+    } else {
+        // Use the oldest record if multiple exist.
+        const recordToUse = records.slice().reverse()[0];
+        console.log("Game state found. Using existing record:", recordToUse);
+        if (records.length > 1) {
+            console.warn(`Found ${records.length} records, but will only use the oldest one.`);
+        }
+        return recordToUse;
+    }
+}
+
+export async function updateSlot(room, recordId, slotIndex, data) {
+    if (slotIndex < 0 || slotIndex >= 10) {
+        console.error(`Invalid slot index: ${slotIndex}`);
+        return;
+    }
+    const payload = {
+        [`slot_${slotIndex}`]: data
+    };
+    try {
+        await room.collection(COLLECTION_NAME).update(recordId, payload);
+    } catch (e) {
+        console.error(`Failed to update slot ${slotIndex}:`, e);
+    }
+}
+
+export async function updatePlayersData(room, recordId, playersData) {
+    await updateSlot(room, recordId, PLAYER_DATA_SLOT, playersData);
+}
+
+export async function updateWorldData(room, recordId, worldData) {
+    await updateSlot(room, recordId, WORLD_DATA_SLOT, worldData);
+}
+
+
+export function subscribeToGameState(room, callback) {
+    return room.collection(COLLECTION_NAME).subscribe(records => {
+        if (records.length > 0) {
+            callback(records[0]);
+        } else {
+            callback(null);
+        }
+    });
+}
